@@ -47,16 +47,29 @@ make bench       # performance: lua_sled vs native sled (+ CI ratio guard)
 ## Performance
 
 `make bench` runs the same 10k-op workload through native sled and through
-`lua_sled` and reports the per-op bridge cost (CI enforces a loose ratio
-bound so performance regressions fail the build):
+`lua_sled` and reports the per-op bridge cost. CI enforces a loose,
+machine-independent ratio bound (`BENCH_MAX_RATIO`, default 200x) so a
+performance regression fails the build.
+
+Representative results (MSYS2/UCRT64, debug of nothing — this is a release
+build; your numbers will vary with hardware):
 
 ```
-insert_ns native=3310 lua=3900 ratio=1.2x
-get_ns    native=518  lua=1100 ratio=2.1x
+--- lua_sled vs native sled (per-op) ---
+insert_ns  native=3000   lua=4500   ratio=1.5x
+ get_ns    native=496    lua=1500   ratio=3.0x
+--- informational (lua side) ---
+table_insert_ns=700      (pure Lua table, in-memory, no persistence)
+table_get_ns=300
+filekv_insert_ns=500     (naive file append, no fsync)
 ```
 
 The mlua bridge overhead is small relative to sled's own I/O, so the binding
-costs roughly 1–2x native per operation.
+costs roughly 1–3x native per operation — while adding persistence, sorted
+iteration, namespaces and compare-and-swap that the pure-table/file
+approaches lack. `iter_ms` (full 10k scan) is printed too but not asserted.
+
+Run it yourself: `make bench`.
 
 ## Usage
 

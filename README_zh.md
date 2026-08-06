@@ -43,14 +43,26 @@ make bench       # 性能对比：lua_sled vs 原生 sled（+ CI 比值守卫）
 ## 性能
 
 `make bench` 用同一 10k 操作工作负载分别跑原生 sled 与 `lua_sled`，报告
-每操作的桥接成本（CI 强制宽松比值上限，性能回退会令构建失败）：
+每操作的桥接成本。CI 强制宽松且机器无关的比值上限
+（`BENCH_MAX_RATIO`，默认 200x），性能回退会令构建失败。
+
+代表性数据（MSYS2/UCRT64 release 构建；具体数值随硬件变化）：
 
 ```
-insert_ns native=3310 lua=3900 ratio=1.2x
-get_ns    native=518  lua=1100 ratio=2.1x
+--- lua_sled vs 原生 sled（每操作） ---
+insert_ns  native=3000   lua=4500   ratio=1.5x
+ get_ns    native=496    lua=1500   ratio=3.0x
+--- 信息性对比（Lua 侧） ---
+table_insert_ns=700      （纯 Lua table，内存，无持久化）
+table_get_ns=300
+filekv_insert_ns=500     （朴素文件追加，无 fsync）
 ```
 
-mlua 桥接开销相对 sled 自身的 I/O 成本很小，绑定约为原生每操作 1–2 倍。
+mlua 桥接开销相对 sled 自身的 I/O 成本很小，绑定约为原生每操作 1–3 倍
+——同时获得了纯 table/文件方案所没有的持久化、排序迭代、命名空间与
+compare-and-swap。`iter_ms`（10k 全量扫描）也会打印但不参与断言。
+
+自行运行：`make bench`。
 
 ## 使用示例
 
