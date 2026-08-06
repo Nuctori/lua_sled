@@ -5,11 +5,6 @@
 `lua_sled` 是一个用 Rust 编写的 Lua C 模块，绑定
 [sled](https://sled.rs)——纯 Rust 实现的嵌入式键值数据库（支持 ACID 事务）。
 
-遵循 [lua_image](https://github.com/Nuctori/lua_image) 采用的 lua-stb 工程
-标准：module mode 链接**宿主 Lua ABI**（绝无双 VM 问题）、测试跑在
-`cargo test` 下（变异测试覆盖完整 Lua 断言套件）、CI 覆盖
-Linux / macOS / Windows。
-
 ## 特性
 
 - `sled.open(path, options?)` — 打开/创建数据库
