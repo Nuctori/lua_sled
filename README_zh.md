@@ -35,6 +35,17 @@ make mutants     # 变异测试（需 `cargo install cargo-mutants`）
 make bench       # 性能对比：lua_sled vs 原生 sled（+ CI 比值守卫）
 ```
 
+## 安装
+
+最简单的方式是源码构建（`make build`）；或使用 LuaRocks：
+
+```bash
+luarocks make lua-sled-scm-1.rockspec
+```
+
+打 tag 的 GitHub 发布会自动产出 Linux、macOS、Windows 预编译模块
+（见 `release` workflow）。
+
 ## 性能
 
 `make bench` 用同一 10k 操作工作负载分别跑原生 sled 与 `lua_sled`，报告
@@ -102,7 +113,16 @@ db:flush()
 | `db:remove(k)` | 旧值或 nil |
 | `db:contains_key(k)` | 布尔 |
 | `db:len()` / `db:is_empty()` | 整数 / 布尔 |
-| `db:clear()` | — |
+| `db:clear()` / `db:flush()` | — |
+| `db:iter()` | for-in 迭代器（`k, v`） |
+| `db:range(start, end)` | for-in 迭代器（闭区间） |
+| `db:scan_prefix(prefix)` | for-in 迭代器（前缀匹配） |
+| `db:first()` / `db:last()` | `k, v` 或 nil |
+| `db:get_lt(k)` / `db:get_gt(k)` | `k, v` 或 nil（严格） |
+| `db:pop_min()` / `db:pop_max()` | `k, v` 或 nil（原子弹出） |
+| `db:apply_batch({insert=..., remove=...})` | — |
+| `db:transaction(fn)` | —（fn 接收 `txn` 句柄） |
+| `db:name()` / `db:checksum()` / `db:verify_integrity()` | 字符串 / 数字 / — |
 | `db:flush()` | — |
 | `db:iter()` | for-in 迭代器（`k, v`） |
 | `db:range(start, end)` | for-in 迭代器（闭区间） |
