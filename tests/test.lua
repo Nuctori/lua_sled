@@ -275,9 +275,53 @@ end)
 assert_eq(tx2:get("a"), "1", "tx2 a")
 assert_eq(tx2:get("b"), "2", "tx2 b")
 
+-- txn:insert/remove return the previous value like the regular methods
+local tprev = tx2:transaction(function(t)
+  local prev = t:insert("a", "10")
+  t:insert("marker", prev or "nil-prev")
+  return true
+end)
+assert_eq(tx2:get("marker"), "1", "txn insert returned previous value")
+
+-- empty-tree ordered access
+local empty = db:open_tree("empty")
+assert_eq(empty:first(), nil, "empty first")
+assert_eq(empty:last(), nil, "empty last")
+assert_eq(empty:pop_min(), nil, "empty pop_min")
+assert_eq(empty:pop_max(), nil, "empty pop_max")
+
+-- empty batch and empty-prefix scan
+empty:apply_batch({})
+empty:apply_batch({ insert = {}, remove = {} })
+for _ in empty:scan_prefix("") do
+  assert(false, "empty prefix scan on empty tree yields nothing")
+end
+
+-- stale txn handle is safely invalidated (mlua scope destructor)
+local saved_txn
+local stale_ok = db:transaction(function(t)
+  saved_txn = t
+  return true
+end)
+assert_error("destructed", function() saved_txn:get("a") end)
+
+-- dropped-tree iteration raises cleanly (lazily, on first next)
+local dt = db:open_tree("dt")
+dt:insert("x", "1")
+db:remove_tree("dt")
+assert_error("does not exist", function()
+  for _ in dt:iter() do end
+end)
+
+-- db:name() is a string (the default tree id)
+assert(type(db:name()) == "string", "db name is a string")
+
 ord = nil
 tx = nil
 tx2 = nil
+empty = nil
+dt = nil
+saved_txn = nil
 
 -- ---------------------------------------------------------------------------
 -- persistence: drop all handles, reopen the same directory

@@ -117,9 +117,9 @@ fn make_iterator(
 
 /// A live transaction view handed to a Lua callback. The underlying reference
 /// is only valid for the duration of the sled transaction closure, so it is
-/// stored as a raw pointer; the userdata must only be used inside the
-/// callback that received it (holding it beyond the transaction is a use-
-/// after-free and documented as unsupported).
+/// stored as a raw pointer. mlua's Scope invalidates the userdata when the
+/// scope ends, so using a saved handle after the callback raises
+/// "userdata has been destructed" (safe, no use-after-free).
 struct TxnRef {
     txn: *const sled::transaction::TransactionalTree,
 }
@@ -131,10 +131,13 @@ impl mlua::UserData for TxnRef {
             let v = lua_bytes(lua, v)?;
             // SAFETY: the handle is only valid during the enclosing
             // transaction callback, which is exactly when it is used here.
-            unsafe { &*this.txn }
+            let prev = unsafe { &*this.txn }
                 .insert(k.as_bytes().as_ref(), v.as_bytes().as_ref())
                 .map_err(|e| mlua::Error::runtime(format!("lua_sled: txn insert: {e}")))?;
-            Ok(())
+            match prev {
+                Some(p) => lua.create_string(p.as_ref()).map(LuaValue::String),
+                None => Ok(mlua::Value::Nil),
+            }
         });
         methods.add_method("get", |lua, this, k: LuaValue| {
             let k = lua_bytes(lua, k)?;

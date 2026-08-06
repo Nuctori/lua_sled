@@ -133,6 +133,26 @@ db:flush()
 | `tree:compare_and_swap(k, old, new)` | 布尔 |
 | `db:compare_and_swap(k, old, new)` | 布尔（默认树） |
 
+事务示例：
+
+```lua
+db:transaction(function(txn)
+  local cur = txn:get("counter")       -- txn:get / insert / remove
+  txn:insert("counter", tostring(cur + 1))
+  return true                            -- true 提交；其他值放弃
+end)
+```
+
+回调内的 Lua 错误会放弃事务并向上传播。sled 在冲突时会重试回调，因此
+副作用可能执行多次。`txn` 句柄只在回调内有效。
+
+**死锁警告**：事务回调内**不要**使用外层 `db`/`tree` 句柄。sled 在事务
+期间持有进程级写锁，而所有常规方法（`get`、`insert`、`iter`、`range`、
+`apply_batch`、嵌套 `transaction`……）都获取不可重入的读锁——在回调内
+调用它们会**永久挂死进程**（不可恢复）。回调内只使用 `txn` 句柄。
+
+Windows 预编译模块链接 `lua54.dll`；你的 Lua 构建 ABI 必须匹配。
+
 注意事项：
 
 - **sled 单进程**：同一路径在句柄存活期间二次 `sled.open` 会报锁错误。

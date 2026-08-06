@@ -155,6 +155,15 @@ A Lua error inside the callback aborts and propagates. sled retries the
 callback on conflict, so side effects may run more than once. The `txn`
 handle is only valid inside the callback.
 
+**Deadlock warning:** never touch the outer `db`/`tree` handle inside a
+transaction callback. sled holds a process-wide write lock during a
+transaction, and every regular method (`get`, `insert`, `iter`, `range`,
+`apply_batch`, a nested `transaction`, ...) takes a non-reentrant read
+lock — calling them from within the callback **permanently deadlocks the
+process** (unrecoverable). Use only the `txn` handle inside the callback.
+
+Prebuilt Windows modules link `lua54.dll`; your Lua build's ABI must match.
+
 Notes:
 
 - `sled` is **single-process**: a second `sled.open` on the same path while
