@@ -34,25 +34,29 @@ fn lua_suite() {
         "liblua_sled.so"
     };
     let module_path = target_dir.join(profile).join(module_file);
-    if !module_path.exists() {
-        let mut cmd = std::process::Command::new("cargo");
-        if cfg!(target_os = "windows") {
-            cmd.env("RUSTUP_TOOLCHAIN", "stable-x86_64-pc-windows-gnu");
-        }
-        let output = cmd
-            .arg("build")
-            .arg("--profile")
-            .arg("test")
-            .arg("--quiet")
-            .output()
-            .expect("run cargo build for the cdylib");
-        assert!(
-            output.status.success(),
-            "cargo build for the cdylib failed:\n{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+    // Always rebuild the cdylib for the current source: cargo test builds the
+    // rlib but a stale module from an earlier build would silently run old
+    // code — exactly what mutation testing must catch. --profile test reuses
+    // the test-profile dependency cache.
+    let mut cmd = std::process::Command::new("cargo");
+    if cfg!(target_os = "windows") {
+        // the module must link the MinGW Lua; select the GNU toolchain via
+        // RUSTUP_TOOLCHAIN (the cargo on PATH is the rustup shim)
+        cmd.env("RUSTUP_TOOLCHAIN", "stable-x86_64-pc-windows-gnu");
     }
+    let output = cmd
+        .arg("build")
+        .arg("--profile")
+        .arg("test")
+        .arg("--quiet")
+        .output()
+        .expect("run cargo build for the cdylib");
+    assert!(
+        output.status.success(),
+        "cargo build for the cdylib failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         module_path.exists(),
         "module not built: {}",

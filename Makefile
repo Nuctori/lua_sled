@@ -42,7 +42,7 @@ build: $(MODULE)
 
 # cargo names cdylibs liblua_sled.{so,dylib} on Unix; Lua looks for
 # lua_sled.so, so expose a symlink with the require name.
-$(MODULE): src/lib.rs Cargo.toml
+$(MODULE): src/lib.rs build.rs Cargo.toml
 	$(CARGO) $(CARGO_TOOLCHAIN) build --release
 	@if [ "$(MODULE)" != "$(CARGO_ARTIFACT)" ]; then \
 	  ln -sf $(notdir $(CARGO_ARTIFACT)) $(MODULE); \

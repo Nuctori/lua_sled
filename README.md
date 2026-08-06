@@ -23,8 +23,10 @@ Linux / macOS / Windows.
   `for k, v in ... do` and yield keys in sorted order
 - **trees (namespaces)**: `open_tree`, `remove_tree`, `tree_names`;
   trees are isolated collections within one database
-- **atomicity**: `compare_and_swap(key, old, new)` for lock-free updates
-- all failures raise `lua_sled:`-prefixed Lua errors
+- **atomicity**: `compare_and_swap(key, old, new)` for lock-free updates; a
+  nil `old` means insert-if-absent, a nil `new` means conditional delete
+- errors raised by the module carry a `lua_sled:` prefix (argument/type
+  errors come from Lua's own conversions)
 
 ## Requirements
 
@@ -85,7 +87,7 @@ users:insert("alice", "42")
 -- lock-free update
 local ok = db:open_tree("counter"):compare_and_swap("n", "1", "2")
 
--- persistence is automatic (flushed on write); flush to force durability
+-- persistence: sled buffers writes; flush() forces durability
 db:flush()
 ```
 
@@ -108,15 +110,21 @@ db:flush()
 | `db:tree_names()` | array of tree names |
 | `tree:...` | same KV/iteration methods as `db` |
 | `tree:compare_and_swap(k, old, new)` | boolean |
+| `db:compare_and_swap(k, old, new)` | boolean (default tree) |
 
 Notes:
 
 - `sled` is **single-process**: a second `sled.open` on the same path while
-  the first handle is alive raises a lock error. Drop all handles (and
-  `collectgarbage()`) before reopening.
-- Removing a tree invalidates existing handles to it (sled semantics).
+  the first handle is alive raises a lock error. Drop all handles — Db, Tree
+  and any iterator state — then `collectgarbage()` before reopening.
+- Removing a tree invalidates existing handles to it (sled semantics); the
+  default tree cannot be removed.
 - sled 0.34 has no read-only open mode; protect the directory with file
   permissions if you need read-only access.
+- sled **buffers writes**: data is durable after `flush()` (or the periodic
+  flusher); a crash may lose very recent writes.
+- On Windows, `lua54.dll`'s directory must be on `PATH` for the test
+  binaries (an MSYS2 shell has it already).
 
 ## License
 

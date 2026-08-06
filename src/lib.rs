@@ -25,13 +25,18 @@ struct LuaTree {
 // ---------------------------------------------------------------------------
 
 /// Converts a Lua value to a byte slice used as a sled key/value: strings are
-/// passed through (binary-safe); numbers are converted via `tostring`-like
-/// semantics (matching lua_tolstring).
+/// passed through (binary-safe); numbers are converted with lua_tolstring
+/// semantics via coerce_string (so `42.0` becomes "42.0", matching Lua's
+/// own tostring).
 fn lua_bytes(lua: &Lua, value: LuaValue) -> mlua::Result<mlua::LuaString> {
     match value {
         LuaValue::String(s) => Ok(s),
-        LuaValue::Number(n) => lua.create_string(n.to_string()),
-        LuaValue::Integer(i) => lua.create_string(i.to_string()),
+        value @ (LuaValue::Number(_) | LuaValue::Integer(_)) => match lua.coerce_string(value)? {
+            Some(s) => Ok(s),
+            None => Err(mlua::Error::runtime(
+                "lua_sled: cannot convert value to string",
+            )),
+        },
         _ => Err(mlua::Error::runtime(
             "lua_sled: key/value must be a string or number",
         )),
@@ -48,26 +53,22 @@ fn sled_err(context: &str, e: sled::Error) -> mlua::Error {
 // ---------------------------------------------------------------------------
 
 /// Lua iterator state: a sled scan cursor. Used via the generic for-in
-/// protocol: `for k, v in db:iter() do ... end`.
+/// protocol: `for k, v in db:iter() do ... end`. sled's Iter yields None
+/// permanently once exhausted, so no extra finished flag is needed.
 struct LuaIter {
     iter: sled::Iter,
-    finished: bool,
 }
 
 impl mlua::UserData for LuaIter {}
 
 /// Creates a for-in triple `(next_fn, state, nil)`. The next function borrows
-/// the state mutably and yields `k, v` (or nil when exhausted). Returning a
-/// `(Vec<u8>, Vec<u8>)` tuple makes mlua push both as Lua strings.
+/// the state mutably and yields `k, v` (or nil when exhausted).
 fn make_iterator(
     lua: &Lua,
     iter: sled::Iter,
 ) -> mlua::Result<(mlua::Function, mlua::AnyUserData, mlua::Value)> {
     let next_fn = lua.create_function(|lua, state: mlua::AnyUserData| {
         let mut iter = state.borrow_mut::<LuaIter>()?;
-        if iter.finished {
-            return Ok(mlua::MultiValue::from_vec(vec![mlua::Value::Nil]));
-        }
         match iter.iter.next() {
             Some(Ok((k, v))) => Ok(mlua::MultiValue::from_vec(vec![
                 mlua::Value::String(lua.create_string(k.as_ref())?),
@@ -76,17 +77,40 @@ fn make_iterator(
             Some(Err(e)) => Err(mlua::Error::runtime(format!(
                 "lua_sled: iteration error: {e}"
             ))),
-            None => {
-                iter.finished = true;
-                Ok(mlua::MultiValue::from_vec(vec![mlua::Value::Nil]))
-            }
+            None => Ok(mlua::MultiValue::from_vec(vec![mlua::Value::Nil])),
         }
     })?;
-    let state = lua.create_userdata(LuaIter {
-        iter,
-        finished: false,
-    })?;
+    let state = lua.create_userdata(LuaIter { iter })?;
     Ok((next_fn, state, mlua::Value::Nil))
+}
+
+/// Shared compare_and_swap implementation for Db and Tree. A nil `old` means
+/// "must not exist" (insert-if-absent); a nil `new` means "delete if the
+/// value matches" (sled's conditional delete).
+fn cas_impl(
+    lua: &Lua,
+    tree: &sled::Tree,
+    k: LuaValue,
+    old: LuaValue,
+    new: LuaValue,
+) -> mlua::Result<bool> {
+    let k = lua_bytes(lua, k)?;
+    let old_bytes = if matches!(old, LuaValue::Nil) {
+        None
+    } else {
+        Some(lua_bytes(lua, old)?)
+    };
+    let new_bytes = if matches!(new, LuaValue::Nil) {
+        None
+    } else {
+        Some(lua_bytes(lua, new)?)
+    };
+    let old: Option<Vec<u8>> = old_bytes.map(|s| s.as_bytes().as_ref().to_vec());
+    let new: Option<Vec<u8>> = new_bytes.map(|s| s.as_bytes().as_ref().to_vec());
+    let res = tree
+        .compare_and_swap(k.as_bytes().as_ref(), old, new)
+        .map_err(|e| sled_err("compare_and_swap", e))?;
+    Ok(res.is_ok())
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +211,14 @@ impl mlua::UserData for LuaDb {
                     .range(start.as_bytes().as_ref()..=end.as_bytes().as_ref()),
             )
         });
+
+        methods.add_method(
+            "compare_and_swap",
+            |lua, this, (k, old, new): (LuaValue, LuaValue, LuaValue)| {
+                // Db derefs to the default tree.
+                cas_impl(lua, &this.db, k, old, new)
+            },
+        );
     }
 }
 
@@ -255,18 +287,7 @@ impl mlua::UserData for LuaTree {
         methods.add_method(
             "compare_and_swap",
             |lua, this, (k, old, new): (LuaValue, LuaValue, LuaValue)| {
-                let k = lua_bytes(lua, k)?;
-                let old = lua_bytes(lua, old)?;
-                let new = lua_bytes(lua, new)?;
-                let res = this
-                    .tree
-                    .compare_and_swap(
-                        k.as_bytes().as_ref(),
-                        Some(old.as_bytes().as_ref()),
-                        Some(new.as_bytes().as_ref()),
-                    )
-                    .map_err(|e| sled_err("compare_and_swap", e))?;
-                Ok(res.is_ok())
+                cas_impl(lua, &this.tree, k, old, new)
             },
         );
 

@@ -21,8 +21,9 @@ Linux / macOS / Windows。
   `for k, v in ... do`，按键排序输出
 - **树（命名空间）**：`open_tree`、`remove_tree`、`tree_names`；树是数据库
   内的隔离集合
-- **原子操作**：`compare_and_swap(key, old, new)` 无锁更新
-- 所有失败抛出带 `lua_sled:` 前缀的 Lua 错误
+- **原子操作**：`compare_and_swap(key, old, new)` 无锁更新；`old` 传 nil
+  表示不存在则插入，`new` 传 nil 表示条件删除
+- 模块抛出的错误带 `lua_sled:` 前缀（参数/类型错误来自 Lua 自身的转换）
 
 ## 依赖要求
 
@@ -80,7 +81,7 @@ users:insert("alice", "42")
 -- 无锁更新
 local ok = db:open_tree("counter"):compare_and_swap("n", "1", "2")
 
--- 持久化自动进行（写入即落盘）；flush 强制同步
+-- 持久化：sled 缓冲写入，flush() 强制落盘
 db:flush()
 ```
 
@@ -103,13 +104,18 @@ db:flush()
 | `db:tree_names()` | 树名数组 |
 | `tree:...` | 与 `db` 相同的键值/迭代方法 |
 | `tree:compare_and_swap(k, old, new)` | 布尔 |
+| `db:compare_and_swap(k, old, new)` | 布尔（默认树） |
 
 注意事项：
 
 - **sled 单进程**：同一路径在句柄存活期间二次 `sled.open` 会报锁错误。
-  重开前请释放所有句柄（赋 nil + `collectgarbage()`）。
-- 删除树会使指向它的旧句柄失效（sled 语义）。
+  重开前请释放所有句柄（Db、Tree 以及迭代器状态），再 `collectgarbage()`。
+- 删除树会使指向它的旧句柄失效（sled 语义）；默认树不可删除。
 - sled 0.34 无只读打开模式；需要只读时请用文件系统权限保护目录。
+- **sled 缓冲写入**：数据在 `flush()`（或周期刷盘）后才保证落盘；崩溃
+  可能丢失最近的写入。
+- Windows 上运行测试二进制需要 `lua54.dll` 所在目录在 `PATH`（MSYS2
+  shell 已包含）。
 
 ## 许可证
 

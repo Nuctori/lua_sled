@@ -49,6 +49,12 @@ assert_eq(db:get("42"), "answer", "numeric key normalizes to string")
 db:insert("n", 7)
 assert_eq(db:get("n"), "7", "numeric value converts")
 
+-- float keys follow Lua tostring semantics (42.0 -> "42.0", not "42")
+db:insert(42.0, "float-key")
+assert_eq(db:get("42.0"), "float-key", "float key uses lua tostring")
+assert_eq(db:get(42.0), "float-key", "float key round-trip")
+assert_eq(db:get("42"), "answer", "float and integer keys are distinct")
+
 -- binary-safe keys and values
 local bin_key = "\0\1\2\255"
 local bin_val = "\254\253\0"
@@ -138,6 +144,36 @@ assert_eq(counter:get("n"), "1", "cas applied")
 assert_eq(counter:compare_and_swap("n", "stale", "99"), false, "cas stale fails")
 assert_eq(counter:get("n"), "1", "cas failed leaves value")
 
+-- cas with nil old = insert-if-absent
+assert_eq(counter:compare_and_swap("absent", nil, "x"), true, "cas nil old inserts")
+assert_eq(counter:get("absent"), "x", "cas insert applied")
+assert_eq(counter:compare_and_swap("absent", nil, "y"), false, "cas nil old fails when present")
+assert_eq(counter:get("absent"), "x", "cas insert-if-absent did not overwrite")
+
+-- cas with nil new = conditional delete
+assert_eq(counter:compare_and_swap("absent", "x", nil), true, "cas nil new deletes")
+assert_eq(counter:get("absent"), nil, "cas delete applied")
+assert_eq(counter:compare_and_swap("absent", "x", nil), false, "cas delete fails when absent")
+
+-- Db also has compare_and_swap (default tree)
+assert_eq(db:compare_and_swap("cas_key", nil, "v"), true, "db cas insert-if-absent")
+assert_eq(db:get("cas_key"), "v", "db cas applied")
+
+-- tree iter/range/clear/flush
+local t2 = db:open_tree("t2")
+t2:insert("x", "1")
+t2:insert("y", "2")
+local t2_count = 0
+for _ in t2:iter() do t2_count = t2_count + 1 end
+assert_eq(t2_count, 2, "tree iter")
+local t2_range = 0
+for _ in t2:range("x", "x") do t2_range = t2_range + 1 end
+assert_eq(t2_range, 1, "tree range")
+t2:flush()
+t2:clear()
+assert_eq(t2:len(), 0, "tree clear")
+t2 = nil
+
 -- ---------------------------------------------------------------------------
 -- persistence: drop all handles, reopen the same directory
 -- ---------------------------------------------------------------------------
@@ -152,7 +188,19 @@ local db2 = sled.open(dir)
 assert_eq(db2:get("a"), "1", "persisted value")
 assert_eq(db2:get("d"), "4", "persisted d")
 assert_eq(db2:open_tree("counter"):get("n"), "1", "persisted tree")
-assert_eq(db2:len(), 4, "persisted len (a-d)")
+assert_eq(db2:len(), 5, "persisted len (a-d + cas_key)")
+
+-- open options forwarding
+local opt_dir = os.tmpname() .. "-opts"
+local opt_db = sled.open(opt_dir, {
+  create_new = true,
+  cache_capacity = 1024,
+  flush_every_ms = 1000,
+  temporary = true,
+})
+assert_eq(opt_db:is_empty(), true, "options forwarded")
+opt_db = nil
+collectgarbage("collect")
 
 -- ---------------------------------------------------------------------------
 -- errors
