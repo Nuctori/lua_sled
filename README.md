@@ -130,8 +130,17 @@ Notes:
 - `sled` is **single-process**: a second `sled.open` on the same path while
   the first handle is alive raises a lock error. Drop all handles — Db, Tree
   and any iterator state — then `collectgarbage()` before reopening.
-- Removing a tree invalidates existing handles to it (sled semantics); the
-  default tree cannot be removed.
+- Removing a tree invalidates existing handles to it: `get`/`insert`/`iter`
+  raise, and `len`/`is_empty` now raise too (sled's own `len()` would hang
+  forever on a dropped tree — the binding probes validity first).
+- `compare_and_swap` requires all three arguments: an omitted `new` raises
+  (it would otherwise be an accidental conditional delete); pass an explicit
+  `nil` for insert-if-absent (`old = nil`) or conditional delete (`new = nil`).
+- `cache_capacity` must be at least 256 bytes; `create_new`/`temporary` must
+  be real booleans (a stray `0` or `"false"` is rejected, not coerced); the
+  database path must be a string.
+- Numbers convert with Lua `tostring` semantics: `42.0` → `"42.0"`, `0/0` →
+  `"nan"`, `-0.0` → `"-0.0"` (so `0.0` and `-0.0` are distinct keys).
 - sled 0.34 has no read-only open mode; protect the directory with file
   permissions if you need read-only access.
 - sled **buffers writes**: data is durable after `flush()` (or the periodic

@@ -92,8 +92,16 @@ fn cas_impl(
     tree: &sled::Tree,
     k: LuaValue,
     old: LuaValue,
-    new: LuaValue,
+    rest: mlua::Variadic<LuaValue>,
 ) -> mlua::Result<bool> {
+    // Distinguish an omitted third argument (typo) from an explicit nil
+    // (conditional delete): a missing argument would silently delete data.
+    if rest.is_empty() {
+        return Err(mlua::Error::runtime(
+            "lua_sled: compare_and_swap requires key, old and new (pass nil for absent/delete)",
+        ));
+    }
+    let new = rest[0].clone();
     let k = lua_bytes(lua, k)?;
     let old_bytes = if matches!(old, LuaValue::Nil) {
         None
@@ -163,8 +171,17 @@ impl mlua::UserData for LuaDb {
                 .map_err(|e| sled_err("contains_key", e))
         });
 
-        methods.add_method("len", |_, this, ()| Ok(this.db.len() as i64));
-        methods.add_method("is_empty", |_, this, ()| Ok(this.db.is_empty()));
+        methods.add_method("len", |lua, this, ()| {
+            // sled's Tree::len() hangs forever on a dropped tree (its
+            // iterator yields Err instead of None); probe validity first.
+            this.db.first().map_err(|e| sled_err("len", e))?;
+            let _ = lua;
+            Ok(this.db.len() as i64)
+        });
+        methods.add_method("is_empty", |_, this, ()| {
+            this.db.first().map_err(|e| sled_err("is_empty", e))?;
+            Ok(this.db.is_empty())
+        });
 
         methods.add_method("flush", |_, this, ()| {
             this.db.flush().map_err(|e| sled_err("flush", e))?;
@@ -214,9 +231,10 @@ impl mlua::UserData for LuaDb {
 
         methods.add_method(
             "compare_and_swap",
-            |lua, this, (k, old, new): (LuaValue, LuaValue, LuaValue)| {
+            |lua, this, args: (LuaValue, LuaValue, mlua::Variadic<LuaValue>)| {
+                let (k, old, rest) = args;
                 // Db derefs to the default tree.
-                cas_impl(lua, &this.db, k, old, new)
+                cas_impl(lua, &this.db, k, old, rest)
             },
         );
     }
@@ -272,8 +290,16 @@ impl mlua::UserData for LuaTree {
                 .map_err(|e| sled_err("contains_key", e))
         });
 
-        methods.add_method("len", |_, this, ()| Ok(this.tree.len() as i64));
-        methods.add_method("is_empty", |_, this, ()| Ok(this.tree.is_empty()));
+        methods.add_method("len", |_, this, ()| {
+            // sled's Tree::len() hangs forever on a dropped tree (its
+            // iterator yields Err instead of None); probe validity first.
+            this.tree.first().map_err(|e| sled_err("len", e))?;
+            Ok(this.tree.len() as i64)
+        });
+        methods.add_method("is_empty", |_, this, ()| {
+            this.tree.first().map_err(|e| sled_err("is_empty", e))?;
+            Ok(this.tree.is_empty())
+        });
 
         methods.add_method("flush", |_, this, ()| {
             this.tree.flush().map_err(|e| sled_err("flush", e))?;
@@ -286,8 +312,9 @@ impl mlua::UserData for LuaTree {
 
         methods.add_method(
             "compare_and_swap",
-            |lua, this, (k, old, new): (LuaValue, LuaValue, LuaValue)| {
-                cas_impl(lua, &this.tree, k, old, new)
+            |lua, this, args: (LuaValue, LuaValue, mlua::Variadic<LuaValue>)| {
+                let (k, old, rest) = args;
+                cas_impl(lua, &this.tree, k, old, rest)
             },
         );
 
@@ -335,8 +362,16 @@ fn reject_unknown_options(opts: &LuaTable, allowed: &[&str]) -> mlua::Result<()>
 fn lua_sled(lua: &Lua) -> LuaResult<LuaTable> {
     let exports = lua.create_table()?;
 
-    // sled.open(path, options?) -> Db
-    let open = lua.create_function(|lua, (path, opts): (String, Option<LuaTable>)| {
+    // sled.open(path, options?) -> Db. path must be a string (a stray number
+    // would silently create a directory named e.g. "123"); booleans are
+    // validated strictly (mlua would otherwise treat 0 or "false" as true).
+    let open = lua.create_function(|lua, (path, opts): (LuaValue, Option<LuaTable>)| {
+        let path = match &path {
+            LuaValue::String(s) => s.to_string_lossy(),
+            _ => {
+                return Err(mlua::Error::runtime("lua_sled: path must be a string"));
+            }
+        };
         let mut config = sled::Config::new().path(&path);
         if let Some(opts) = opts {
             reject_unknown_options(
@@ -348,16 +383,30 @@ fn lua_sled(lua: &Lua) -> LuaResult<LuaTable> {
                     "temporary",
                 ],
             )?;
-            if let Some(create_new) = opts.get::<Option<bool>>("create_new")? {
+            let bool_option = |opts: &LuaTable, name: &str| -> mlua::Result<Option<bool>> {
+                match opts.get::<Option<LuaValue>>(name)? {
+                    None => Ok(None),
+                    Some(LuaValue::Boolean(b)) => Ok(Some(b)),
+                    Some(_) => Err(mlua::Error::runtime(format!(
+                        "lua_sled: option '{name}' must be a boolean"
+                    ))),
+                }
+            };
+            if let Some(create_new) = bool_option(&opts, "create_new")? {
                 config = config.create_new(create_new);
             }
             if let Some(cap) = opts.get::<Option<u64>>("cache_capacity")? {
+                if cap < 256 {
+                    return Err(mlua::Error::runtime(
+                        "lua_sled: cache_capacity must be at least 256 bytes",
+                    ));
+                }
                 config = config.cache_capacity(cap);
             }
             if let Some(ms) = opts.get::<Option<u64>>("flush_every_ms")? {
                 config = config.flush_every_ms(Some(ms));
             }
-            if let Some(temp) = opts.get::<Option<bool>>("temporary")? {
+            if let Some(temp) = bool_option(&opts, "temporary")? {
                 config = config.temporary(temp);
             }
         }

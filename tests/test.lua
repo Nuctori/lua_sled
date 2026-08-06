@@ -55,6 +55,17 @@ assert_eq(db:get("42.0"), "float-key", "float key uses lua tostring")
 assert_eq(db:get(42.0), "float-key", "float key round-trip")
 assert_eq(db:get("42"), "answer", "float and integer keys are distinct")
 
+-- NaN/Inf keys follow Lua tostring too ("nan"/"inf"/"-inf" strings)
+db:insert(0 / 0, "nan-val")
+assert_eq(db:get("nan"), "nan-val", "nan key is the string 'nan'")
+db:insert(1 / 0, "inf-val")
+assert_eq(db:get("inf"), "inf-val", "inf key is the string 'inf'")
+
+-- -0.0 and 0.0 are equal but map to different strings (Lua tostring)
+db:insert(-0.0, "negzero")
+assert_eq(db:get(-0.0), "negzero", "-0.0 round-trips")
+assert_eq(db:get(0.0), nil, "0.0 and -0.0 are distinct keys")
+
 -- binary-safe keys and values
 local bin_key = "\0\1\2\255"
 local bin_val = "\254\253\0"
@@ -132,6 +143,10 @@ assert_eq(db:remove_tree("users"), true, "remove_tree returns true")
 assert_eq(db:remove_tree("users"), false, "remove_tree on missing tree returns false")
 -- the dropped tree handle is invalidated by sled
 assert_error("does not exist", function() users:get("alice") end)
+-- len/is_empty on a dropped tree must error, NOT hang (sled's iter yields
+-- Err forever; the binding probes validity first)
+assert_error("does not exist", function() users:len() end)
+assert_error("does not exist", function() users:is_empty() end)
 
 -- ---------------------------------------------------------------------------
 -- compare_and_swap
@@ -213,7 +228,23 @@ assert_error("must be a string", function() db2:insert(true, "x") end)
 assert_error("must be a string", function() db2:insert("k", true) end)
 assert_error("must be a string", function() db2:get({}) end)
 assert_error("must be a string", function() db2:insert("k") end)
-assert_error("bad argument", function() sled.open() end)
+assert_error("must be a string", function() sled.open() end)
+assert_error("path must be a string", function() sled.open(123) end)
+assert_error("must be a boolean", function()
+  sled.open(os.tmpname() .. "-b", { create_new = "yes" })
+end)
+assert_error("must be a boolean", function()
+  sled.open(os.tmpname() .. "-b", { temporary = 0 })
+end)
+assert_error("cache_capacity must be at least 256", function()
+  sled.open(os.tmpname() .. "-b", { cache_capacity = 100 })
+end)
+-- compare_and_swap without the new argument must error (not delete!)
+assert_error("requires key, old and new", function()
+  db2:compare_and_swap("cas_key", "v")
+end)
+-- ...and the value must still be there
+assert_eq(db2:get("cas_key"), "v", "cas missing-arg did not delete")
 
 -- ---------------------------------------------------------------------------
 -- reopen without create_new on an existing dir (after dropping handles)
