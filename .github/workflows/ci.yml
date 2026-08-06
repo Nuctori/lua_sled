@@ -29,6 +29,27 @@ jobs:
       - name: Rust tests
         run: make test-rust
 
+  # Performance regression guard: lua_sled per-op time must stay within a
+  # loose multiple of native sled (the mlua bridge cost). Machine-independent
+  # ratio bound; informational comparisons are printed too.
+  bench:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4 liblua5.4-dev pkg-config
+
+      - name: Benchmark (lua_sled vs native sled)
+        run: make bench
+
   macos:
     runs-on: macos-latest
 

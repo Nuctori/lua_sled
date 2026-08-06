@@ -36,7 +36,20 @@ make build       # cargo build --release + 模块符号链接
 make test        # 运行 tests/test.lua
 make test-rust   # cargo test：Rust 单测 + 完整 Lua 套件
 make mutants     # 变异测试（需 `cargo install cargo-mutants`）
+make bench       # 性能对比：lua_sled vs 原生 sled（+ CI 比值守卫）
 ```
+
+## 性能
+
+`make bench` 用同一 10k 操作工作负载分别跑原生 sled 与 `lua_sled`，报告
+每操作的桥接成本（CI 强制宽松比值上限，性能回退会令构建失败）：
+
+```
+insert_ns native=3310 lua=3900 ratio=1.2x
+get_ns    native=518  lua=1100 ratio=2.1x
+```
+
+mlua 桥接开销相对 sled 自身的 I/O 成本很小，绑定约为原生每操作 1–2 倍。
 
 ## 使用示例
 

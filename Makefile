@@ -34,7 +34,7 @@ CARGO_ARTIFACT := target/release/liblua_sled.so
 MODULE := target/release/lua_sled.so
 endif
 
-.PHONY: all build test test-rust mutants clean
+.PHONY: all build test test-rust mutants bench clean
 
 all: build
 
@@ -62,6 +62,25 @@ test-rust: build
 # Install once with: cargo install cargo-mutants
 mutants:
 	$(CARGO) $(CARGO_TOOLCHAIN) mutants --file src/lib.rs --no-shuffle --jobs 1
+
+# Performance: native sled baseline vs the Lua binding (bridge overhead),
+# plus informational pure-table / file-KV comparisons. The CI-friendly
+# assertion is a loose per-op ratio bound (machine-independent).
+BENCH_MAX_RATIO ?= 200
+bench: build
+	$(CARGO) $(CARGO_TOOLCHAIN) run --release --example bench_native \
+	  | grep -E '^(insert_ns|get_ns|iter_ms|count)=' > /tmp/sled_bench_native.txt
+	$(LUA_BIN) -e 'local s = package.config:sub(3,3); package.cpath = "target/release/?.dll" .. s .. "target/release/?.so" .. s .. package.cpath' \
+	  tests/bench.lua > /tmp/sled_bench_lua.txt
+	@echo "=== lua_sled vs native sled (per-op) ==="
+	@awk -F= 'FNR==NR { n[$$1]=$$2; next } $$1 ~ /_ns$$/ && $$1 in n { \
+	  printf "%-12s native=%-8s lua=%-8s ratio=%.1fx\n", $$1, n[$$1], $$2, $$2/n[$$1]; \
+	  if ($$2/n[$$1] > $(BENCH_MAX_RATIO)) { \
+	    printf "FAIL: %s ratio %.1fx exceeds $(BENCH_MAX_RATIO)x\n", $$1, $$2/n[$$1] > "/dev/stderr"; exit 1 } }' \
+	  /tmp/sled_bench_native.txt /tmp/sled_bench_lua.txt
+	@echo "=== informational (lua side) ==="
+	@grep -E '^(table_|filekv_)' /tmp/sled_bench_lua.txt || true
+	@echo "bench ok (max per-op ratio $(BENCH_MAX_RATIO)x)"
 
 clean:
 	$(CARGO) $(CARGO_TOOLCHAIN) clean

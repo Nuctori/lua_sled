@@ -39,7 +39,22 @@ make build       # cargo build --release + module symlink
 make test        # run tests/test.lua
 make test-rust   # cargo test: Rust unit tests + the full Lua suite
 make mutants     # mutation testing (needs `cargo install cargo-mutants`)
+make bench       # performance: lua_sled vs native sled (+ CI ratio guard)
 ```
+
+## Performance
+
+`make bench` runs the same 10k-op workload through native sled and through
+`lua_sled` and reports the per-op bridge cost (CI enforces a loose ratio
+bound so performance regressions fail the build):
+
+```
+insert_ns native=3310 lua=3900 ratio=1.2x
+get_ns    native=518  lua=1100 ratio=2.1x
+```
+
+The mlua bridge overhead is small relative to sled's own I/O, so the binding
+costs roughly 1–2x native per operation.
 
 ## Usage
 
