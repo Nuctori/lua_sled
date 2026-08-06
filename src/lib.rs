@@ -59,7 +59,10 @@ impl mlua::UserData for LuaIter {}
 /// Creates a for-in triple `(next_fn, state, nil)`. The next function borrows
 /// the state mutably and yields `k, v` (or nil when exhausted). Returning a
 /// `(Vec<u8>, Vec<u8>)` tuple makes mlua push both as Lua strings.
-fn make_iterator(lua: &Lua, iter: sled::Iter) -> mlua::Result<(mlua::Function, mlua::AnyUserData, mlua::Value)> {
+fn make_iterator(
+    lua: &Lua,
+    iter: sled::Iter,
+) -> mlua::Result<(mlua::Function, mlua::AnyUserData, mlua::Value)> {
     let next_fn = lua.create_function(|lua, state: mlua::AnyUserData| {
         let mut iter = state.borrow_mut::<LuaIter>()?;
         if iter.finished {
@@ -79,7 +82,10 @@ fn make_iterator(lua: &Lua, iter: sled::Iter) -> mlua::Result<(mlua::Function, m
             }
         }
     })?;
-    let state = lua.create_userdata(LuaIter { iter, finished: false })?;
+    let state = lua.create_userdata(LuaIter {
+        iter,
+        finished: false,
+    })?;
     Ok((next_fn, state, mlua::Value::Nil))
 }
 
@@ -137,16 +143,12 @@ impl mlua::UserData for LuaDb {
         methods.add_method("is_empty", |_, this, ()| Ok(this.db.is_empty()));
 
         methods.add_method("flush", |_, this, ()| {
-            this.db
-                .flush()
-                .map_err(|e| sled_err("flush", e))?;
+            this.db.flush().map_err(|e| sled_err("flush", e))?;
             Ok(())
         });
 
         methods.add_method("clear", |_, this, ()| {
-            this.db
-                .clear()
-                .map_err(|e| sled_err("clear", e))
+            this.db.clear().map_err(|e| sled_err("clear", e))
         });
 
         methods.add_method("tree_names", |lua, this, ()| {
@@ -176,17 +178,15 @@ impl mlua::UserData for LuaDb {
 
         methods.add_method("iter", |lua, this, ()| make_iterator(lua, this.db.iter()));
 
-        methods.add_method(
-            "range",
-            |lua, this, (start, end): (LuaValue, LuaValue)| {
-                let start = lua_bytes(lua, start)?;
-                let end = lua_bytes(lua, end)?;
-                make_iterator(
-                    lua,
-                    this.db.range(start.as_bytes().as_ref()..=end.as_bytes().as_ref()),
-                )
-            },
-        );
+        methods.add_method("range", |lua, this, (start, end): (LuaValue, LuaValue)| {
+            let start = lua_bytes(lua, start)?;
+            let end = lua_bytes(lua, end)?;
+            make_iterator(
+                lua,
+                this.db
+                    .range(start.as_bytes().as_ref()..=end.as_bytes().as_ref()),
+            )
+        });
     }
 }
 
@@ -244,16 +244,12 @@ impl mlua::UserData for LuaTree {
         methods.add_method("is_empty", |_, this, ()| Ok(this.tree.is_empty()));
 
         methods.add_method("flush", |_, this, ()| {
-            this.tree
-                .flush()
-                .map_err(|e| sled_err("flush", e))?;
+            this.tree.flush().map_err(|e| sled_err("flush", e))?;
             Ok(())
         });
 
         methods.add_method("clear", |_, this, ()| {
-            this.tree
-                .clear()
-                .map_err(|e| sled_err("clear", e))
+            this.tree.clear().map_err(|e| sled_err("clear", e))
         });
 
         methods.add_method(
@@ -276,17 +272,15 @@ impl mlua::UserData for LuaTree {
 
         methods.add_method("iter", |lua, this, ()| make_iterator(lua, this.tree.iter()));
 
-        methods.add_method(
-            "range",
-            |lua, this, (start, end): (LuaValue, LuaValue)| {
-                let start = lua_bytes(lua, start)?;
-                let end = lua_bytes(lua, end)?;
-                make_iterator(
-                    lua,
-                    this.tree.range(start.as_bytes().as_ref()..=end.as_bytes().as_ref()),
-                )
-            },
-        );
+        methods.add_method("range", |lua, this, (start, end): (LuaValue, LuaValue)| {
+            let start = lua_bytes(lua, start)?;
+            let end = lua_bytes(lua, end)?;
+            make_iterator(
+                lua,
+                this.tree
+                    .range(start.as_bytes().as_ref()..=end.as_bytes().as_ref()),
+            )
+        });
     }
 }
 
@@ -297,9 +291,8 @@ impl mlua::UserData for LuaTree {
 /// Validates the options table keys for `sled.open` (strict, like lua_image).
 fn reject_unknown_options(opts: &LuaTable, allowed: &[&str]) -> mlua::Result<()> {
     for pair in opts.clone().pairs::<mlua::Value, mlua::Value>() {
-        let (key, _) = pair.map_err(|e| {
-            mlua::Error::runtime(format!("lua_sled: open options: {e}"))
-        })?;
+        let (key, _) =
+            pair.map_err(|e| mlua::Error::runtime(format!("lua_sled: open options: {e}")))?;
         let key = match key {
             mlua::Value::String(s) => s.to_string_lossy().to_string(),
             _ => {
@@ -327,7 +320,12 @@ fn lua_sled(lua: &Lua) -> LuaResult<LuaTable> {
         if let Some(opts) = opts {
             reject_unknown_options(
                 &opts,
-                &["create_new", "cache_capacity", "flush_every_ms", "temporary"],
+                &[
+                    "create_new",
+                    "cache_capacity",
+                    "flush_every_ms",
+                    "temporary",
+                ],
             )?;
             if let Some(create_new) = opts.get::<Option<bool>>("create_new")? {
                 config = config.create_new(create_new);

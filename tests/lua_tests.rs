@@ -21,7 +21,11 @@ fn lua_suite() {
     let target_dir = std::env::var("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     let module_file = if cfg!(target_os = "windows") {
         "lua_sled.dll"
     } else if cfg!(target_os = "macos") {
@@ -49,7 +53,11 @@ fn lua_suite() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    assert!(module_path.exists(), "module not built: {}", module_path.display());
+    assert!(
+        module_path.exists(),
+        "module not built: {}",
+        module_path.display()
+    );
 
     unsafe {
         let state = ffi::luaL_newstate();
@@ -57,8 +65,9 @@ fn lua_suite() {
         ffi::luaL_openlibs(state);
 
         let lib = Library::new(&module_path).expect("dlopen lua_sled module");
-        let luaopen: libloading::Symbol<unsafe extern "C" fn(*mut ffi::lua_State) -> i32> =
-            lib.get(b"luaopen_lua_sled").expect("luaopen_lua_sled symbol");
+        let luaopen: libloading::Symbol<unsafe extern "C" fn(*mut ffi::lua_State) -> i32> = lib
+            .get(b"luaopen_lua_sled")
+            .expect("luaopen_lua_sled symbol");
         luaopen(state);
         ffi::lua_getglobal(state, c"package".as_ptr());
         ffi::lua_getfield(state, -1, c"loaded".as_ptr());
