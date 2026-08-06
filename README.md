@@ -44,6 +44,17 @@ make mutants     # mutation testing (needs `cargo install cargo-mutants`)
 make bench       # performance: lua_sled vs native sled (+ CI ratio guard)
 ```
 
+## Installation
+
+The simplest path is a source build (`make build`); with LuaRocks:
+
+```bash
+luarocks make lua-sled-scm-1.rockspec
+```
+
+Tagged GitHub releases publish prebuilt modules for Linux, macOS and
+Windows (see the `release` workflow).
+
 ## Performance
 
 `make bench` runs the same 10k-op workload through native sled and through
@@ -114,16 +125,35 @@ db:flush()
 | `db:remove(k)` | previous value or nil |
 | `db:contains_key(k)` | boolean |
 | `db:len()` / `db:is_empty()` | integer / boolean |
-| `db:clear()` | — |
-| `db:flush()` | — |
+| `db:clear()` / `db:flush()` | — |
 | `db:iter()` | for-in iterator (`k, v`) |
 | `db:range(start, end)` | for-in iterator (inclusive) |
+| `db:scan_prefix(prefix)` | for-in iterator (keys starting with prefix) |
+| `db:first()` / `db:last()` | `k, v` or nil |
+| `db:get_lt(k)` / `db:get_gt(k)` | `k, v` or nil (strict) |
+| `db:pop_min()` / `db:pop_max()` | `k, v` or nil (atomic pop) |
+| `db:apply_batch({insert=..., remove=...})` | — |
+| `db:transaction(fn)` | — (fn receives a `txn` handle) |
+| `db:name()` / `db:checksum()` / `db:verify_integrity()` | string / number / — |
 | `db:open_tree(name)` | `Tree` userdata |
 | `db:remove_tree(name)` | boolean (was it present) |
 | `db:tree_names()` | array of tree names |
-| `tree:...` | same KV/iteration methods as `db` |
-| `tree:compare_and_swap(k, old, new)` | boolean |
+| `tree:...` | the same methods as `db` |
 | `db:compare_and_swap(k, old, new)` | boolean (default tree) |
+
+Transactions:
+
+```lua
+db:transaction(function(txn)
+  local cur = txn:get("counter")       -- txn:get / insert / remove
+  txn:insert("counter", tostring(cur + 1))
+  return true                            -- true commits; anything else aborts
+end)
+```
+
+A Lua error inside the callback aborts and propagates. sled retries the
+callback on conflict, so side effects may run more than once. The `txn`
+handle is only valid inside the callback.
 
 Notes:
 

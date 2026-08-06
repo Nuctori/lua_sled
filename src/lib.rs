@@ -5,7 +5,8 @@
 //! overridable via `LUA_LIB`/`LUA_LIB_NAME`/`LUA_LINK`), never a vendored
 //! VM, so it can be `require`d from any Lua 5.4 process.
 //!
-//! All failures raise Lua errors prefixed with `lua_sled:`.
+//! Errors raised by the module carry a `lua_sled:` prefix (argument/type
+//! errors come from Lua's own conversions).
 
 use mlua::prelude::*;
 
@@ -18,6 +19,21 @@ struct LuaDb {
 /// Opaque handle to a named tree (namespace) within a database.
 struct LuaTree {
     tree: sled::Tree,
+}
+
+/// Uniform access to the underlying sled::Tree for both handles.
+trait TreeAccess {
+    fn tree(&self) -> &sled::Tree;
+}
+impl TreeAccess for LuaDb {
+    fn tree(&self) -> &sled::Tree {
+        &self.db
+    }
+}
+impl TreeAccess for LuaTree {
+    fn tree(&self) -> &sled::Tree {
+        &self.tree
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -46,6 +62,17 @@ fn lua_bytes(lua: &Lua, value: LuaValue) -> mlua::Result<mlua::LuaString> {
 /// Turns a sled error into a Lua error with the lua_sled: prefix.
 fn sled_err(context: &str, e: sled::Error) -> mlua::Error {
     mlua::Error::runtime(format!("lua_sled: {context}: {e}"))
+}
+
+/// Pushes an optional `(key, value)` pair as two Lua values (nil when absent).
+fn push_pair(lua: &Lua, pair: Option<(sled::IVec, sled::IVec)>) -> mlua::Result<mlua::MultiValue> {
+    match pair {
+        Some((k, v)) => Ok(mlua::MultiValue::from_vec(vec![
+            mlua::Value::String(lua.create_string(k.as_ref())?),
+            mlua::Value::String(lua.create_string(v.as_ref())?),
+        ])),
+        None => Ok(mlua::MultiValue::from_vec(vec![mlua::Value::Nil])),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -82,6 +109,335 @@ fn make_iterator(
     })?;
     let state = lua.create_userdata(LuaIter { iter })?;
     Ok((next_fn, state, mlua::Value::Nil))
+}
+
+// ---------------------------------------------------------------------------
+// transactions
+// ---------------------------------------------------------------------------
+
+/// A live transaction view handed to a Lua callback. The underlying reference
+/// is only valid for the duration of the sled transaction closure, so it is
+/// stored as a raw pointer; the userdata must only be used inside the
+/// callback that received it (holding it beyond the transaction is a use-
+/// after-free and documented as unsupported).
+struct TxnRef {
+    txn: *const sled::transaction::TransactionalTree,
+}
+
+impl mlua::UserData for TxnRef {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("insert", |lua, this, (k, v): (LuaValue, LuaValue)| {
+            let k = lua_bytes(lua, k)?;
+            let v = lua_bytes(lua, v)?;
+            // SAFETY: the handle is only valid during the enclosing
+            // transaction callback, which is exactly when it is used here.
+            unsafe { &*this.txn }
+                .insert(k.as_bytes().as_ref(), v.as_bytes().as_ref())
+                .map_err(|e| mlua::Error::runtime(format!("lua_sled: txn insert: {e}")))?;
+            Ok(())
+        });
+        methods.add_method("get", |lua, this, k: LuaValue| {
+            let k = lua_bytes(lua, k)?;
+            let v = unsafe { &*this.txn }
+                .get(k.as_bytes().as_ref())
+                .map_err(|e| mlua::Error::runtime(format!("lua_sled: txn get: {e}")))?;
+            match v {
+                Some(p) => lua.create_string(p.as_ref()).map(LuaValue::String),
+                None => Ok(mlua::Value::Nil),
+            }
+        });
+        methods.add_method("remove", |lua, this, k: LuaValue| {
+            let k = lua_bytes(lua, k)?;
+            let prev = unsafe { &*this.txn }
+                .remove(k.as_bytes().as_ref())
+                .map_err(|e| mlua::Error::runtime(format!("lua_sled: txn remove: {e}")))?;
+            match prev {
+                Some(p) => lua.create_string(p.as_ref()).map(LuaValue::String),
+                None => Ok(mlua::Value::Nil),
+            }
+        });
+    }
+}
+
+/// Outcome of a transaction callback: a Lua error (propagated) or a plain
+/// abort (returning non-true, silently rolled back).
+enum TxControl {
+    Failed(mlua::Error),
+    Aborted,
+}
+
+/// Shared transaction implementation: runs the Lua callback inside a sled
+/// transaction. The callback receives a `txn` handle; returning `true`
+/// commits, anything else aborts silently, and a Lua error propagates.
+/// sled retries on conflict, so the callback may run more than once (Lua
+/// side effects would repeat).
+fn transaction_impl(lua: &Lua, tree: &sled::Tree, f: mlua::Function) -> mlua::Result<()> {
+    // lua.scope requires the closure to return mlua::Result; wrap the sled
+    // transaction outcome inside Ok(..) and translate its errors.
+    let outcome: Result<(), mlua::Error> = lua.scope(|scope| {
+        Ok(
+            match tree.transaction(|txn| {
+                let txn_ud = scope
+                    .create_userdata(TxnRef {
+                        txn: txn as *const sled::transaction::TransactionalTree,
+                    })
+                    .map_err(|e| {
+                        sled::transaction::ConflictableTransactionError::Abort(TxControl::Failed(e))
+                    })?;
+                match f.call::<mlua::Value>(txn_ud) {
+                    Ok(mlua::Value::Boolean(true)) => Ok(()),
+                    Ok(_) => Err(sled::transaction::ConflictableTransactionError::Abort(
+                        TxControl::Aborted,
+                    )),
+                    Err(e) => Err(sled::transaction::ConflictableTransactionError::Abort(
+                        TxControl::Failed(e),
+                    )),
+                }
+            }) {
+                Ok(()) => Ok(()),
+                Err(sled::transaction::TransactionError::Abort(TxControl::Aborted)) => Ok(()),
+                Err(sled::transaction::TransactionError::Abort(TxControl::Failed(e))) => Err(e),
+                Err(sled::transaction::TransactionError::Storage(e)) => {
+                    Err(sled_err("transaction", e))
+                }
+            },
+        )
+    })?;
+    outcome
+}
+
+// ---------------------------------------------------------------------------
+// shared methods (generated for both LuaDb and LuaTree)
+// ---------------------------------------------------------------------------
+
+macro_rules! impl_tree_methods {
+    ($ty:ty, $has_db:tt) => {
+        impl mlua::UserData for $ty {
+            fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+                methods.add_method("insert", |lua, this, (k, v): (LuaValue, LuaValue)| {
+                    let k = lua_bytes(lua, k)?;
+                    let v = lua_bytes(lua, v)?;
+                    let prev = this
+                        .tree()
+                        .insert(k.as_bytes().as_ref(), v.as_bytes().as_ref())
+                        .map_err(|e| sled_err("insert", e))?;
+                    match prev {
+                        Some(p) => lua.create_string(p.as_ref()).map(LuaValue::String),
+                        None => Ok(mlua::Value::Nil),
+                    }
+                });
+
+                methods.add_method("get", |lua, this, k: LuaValue| {
+                    let k = lua_bytes(lua, k)?;
+                    let v = this
+                        .tree()
+                        .get(k.as_bytes().as_ref())
+                        .map_err(|e| sled_err("get", e))?;
+                    match v {
+                        Some(p) => lua.create_string(p.as_ref()).map(LuaValue::String),
+                        None => Ok(mlua::Value::Nil),
+                    }
+                });
+
+                methods.add_method("remove", |lua, this, k: LuaValue| {
+                    let k = lua_bytes(lua, k)?;
+                    let prev = this
+                        .tree()
+                        .remove(k.as_bytes().as_ref())
+                        .map_err(|e| sled_err("remove", e))?;
+                    match prev {
+                        Some(p) => lua.create_string(p.as_ref()).map(LuaValue::String),
+                        None => Ok(mlua::Value::Nil),
+                    }
+                });
+
+                methods.add_method("contains_key", |lua, this, k: LuaValue| {
+                    let k = lua_bytes(lua, k)?;
+                    this.tree()
+                        .contains_key(k.as_bytes().as_ref())
+                        .map_err(|e| sled_err("contains_key", e))
+                });
+
+                methods.add_method("len", |_, this, ()| {
+                    // sled's Tree::len() hangs forever on a dropped tree (its
+                    // iterator yields Err instead of None); probe validity first.
+                    this.tree()
+                        .first()
+                        .map_err(|e| sled_err("len", e))?;
+                    Ok(this.tree().len() as i64)
+                });
+                methods.add_method("is_empty", |_, this, ()| {
+                    this.tree()
+                        .first()
+                        .map_err(|e| sled_err("is_empty", e))?;
+                    Ok(this.tree().is_empty())
+                });
+
+                methods.add_method("flush", |_, this, ()| {
+                    this.tree().flush().map_err(|e| sled_err("flush", e))?;
+                    Ok(())
+                });
+
+                methods.add_method("clear", |_, this, ()| {
+                    this.tree().clear().map_err(|e| sled_err("clear", e))
+                });
+
+                // -- ordered access ----------------------------------------
+
+                methods.add_method("first", |lua, this, ()| {
+                    push_pair(lua, this.tree().first().map_err(|e| sled_err("first", e))?)
+                });
+
+                methods.add_method("last", |lua, this, ()| {
+                    push_pair(lua, this.tree().last().map_err(|e| sled_err("last", e))?)
+                });
+
+                methods.add_method("pop_min", |lua, this, ()| {
+                    push_pair(lua, this.tree().pop_min().map_err(|e| sled_err("pop_min", e))?)
+                });
+
+                methods.add_method("pop_max", |lua, this, ()| {
+                    push_pair(lua, this.tree().pop_max().map_err(|e| sled_err("pop_max", e))?)
+                });
+
+                methods.add_method("get_lt", |lua, this, k: LuaValue| {
+                    let k = lua_bytes(lua, k)?;
+                    push_pair(
+                        lua,
+                        this.tree()
+                            .get_lt(k.as_bytes().as_ref())
+                            .map_err(|e| sled_err("get_lt", e))?,
+                    )
+                });
+
+                methods.add_method("get_gt", |lua, this, k: LuaValue| {
+                    let k = lua_bytes(lua, k)?;
+                    push_pair(
+                        lua,
+                        this.tree()
+                            .get_gt(k.as_bytes().as_ref())
+                            .map_err(|e| sled_err("get_gt", e))?,
+                    )
+                });
+
+                methods.add_method("name", |lua, this, ()| {
+                    let name = this.tree().name();
+                    lua.create_string(name.as_ref()).map(LuaValue::String)
+                });
+
+                // -- iteration ----------------------------------------------
+
+                methods.add_method("iter", |lua, this, ()| make_iterator(lua, this.tree().iter()));
+
+                methods.add_method(
+                    "range",
+                    |lua, this, (start, end): (LuaValue, LuaValue)| {
+                        let start = lua_bytes(lua, start)?;
+                        let end = lua_bytes(lua, end)?;
+                        make_iterator(
+                            lua,
+                            this.tree()
+                                .range(start.as_bytes().as_ref()..=end.as_bytes().as_ref()),
+                        )
+                    },
+                );
+
+                methods.add_method("scan_prefix", |lua, this, prefix: LuaValue| {
+                    let prefix = lua_bytes(lua, prefix)?;
+                    make_iterator(lua, this.tree().scan_prefix(prefix.as_bytes().as_ref()))
+                });
+
+                // -- atomicity ----------------------------------------------
+
+                methods.add_method(
+                    "compare_and_swap",
+                    |lua, this, args: (LuaValue, LuaValue, mlua::Variadic<LuaValue>)| {
+                        let (k, old, rest) = args;
+                        cas_impl(lua, this.tree(), k, old, rest)
+                    },
+                );
+
+                methods.add_method(
+                    "transaction",
+                    |lua, this, f: mlua::Function| transaction_impl(lua, this.tree(), f),
+                );
+
+                // -- batch ---------------------------------------------------
+
+                methods.add_method("apply_batch", |lua, this, batch: LuaTable| {
+                    let mut b = sled::Batch::default();
+                    if let Some(inserts) = batch.get::<Option<LuaTable>>("insert")? {
+                        for pair in inserts.clone().pairs::<LuaValue, LuaValue>() {
+                            let (k, v) = pair.map_err(|e| {
+                                mlua::Error::runtime(format!(
+                                    "lua_sled: apply_batch insert: {e}"
+                                ))
+                            })?;
+                            let k = lua_bytes(lua, k)?;
+                            let v = lua_bytes(lua, v)?;
+                            b.insert(k.as_bytes().as_ref(), v.as_bytes().as_ref());
+                        }
+                    }
+                    if let Some(removes) = batch.get::<Option<LuaTable>>("remove")? {
+                        for pair in removes.clone().pairs::<i64, LuaValue>() {
+                            let (_, k) = pair.map_err(|e| {
+                                mlua::Error::runtime(format!(
+                                    "lua_sled: apply_batch remove: {e}"
+                                ))
+                            })?;
+                            let k = lua_bytes(lua, k)?;
+                            b.remove(k.as_bytes().as_ref());
+                        }
+                    }
+                    this.tree()
+                        .apply_batch(b)
+                        .map_err(|e| sled_err("apply_batch", e))
+                });
+
+                // -- integrity -----------------------------------------------
+
+                methods.add_method("checksum", |_, this, ()| {
+                    this.tree()
+                        .checksum()
+                        .map(|c| c as i64)
+                        .map_err(|e| sled_err("checksum", e))
+                });
+
+                methods.add_method("verify_integrity", |_, this, ()| {
+                    this.tree()
+                        .verify_integrity()
+                        .map_err(|e| sled_err("verify_integrity", e))
+                });
+
+                impl_tree_methods!(@db $has_db, methods);
+            }
+        }
+    };
+    (@db true, $m:ident) => {
+        $m.add_method("tree_names", |lua, this, ()| {
+            let names = this.db.tree_names();
+            let t = lua.create_table()?;
+            for (i, name) in names.iter().enumerate() {
+                t.set(i + 1, lua.create_string(name.as_ref())?)?;
+            }
+            Ok(t)
+        });
+        $m.add_method("open_tree", |lua, this, name: mlua::LuaString| {
+            let tree = this
+                .db
+                .open_tree(name.as_bytes().as_ref())
+                .map_err(|e| sled_err("open_tree", e))?;
+            lua.create_userdata(LuaTree { tree })
+        });
+        $m.add_method("remove_tree", |_, this, name: mlua::LuaString| {
+            let removed = this
+                .db
+                .drop_tree(name.as_bytes().as_ref())
+                .map_err(|e| sled_err("remove_tree", e))?;
+            Ok(removed)
+        });
+    };
+    (@db false, $m:ident) => {};
 }
 
 /// Shared compare_and_swap implementation for Db and Tree. A nil `old` means
@@ -121,216 +477,8 @@ fn cas_impl(
     Ok(res.is_ok())
 }
 
-// ---------------------------------------------------------------------------
-// LuaDb
-// ---------------------------------------------------------------------------
-
-impl mlua::UserData for LuaDb {
-    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("insert", |lua, this, (k, v): (LuaValue, LuaValue)| {
-            let k = lua_bytes(lua, k)?;
-            let v = lua_bytes(lua, v)?;
-            let prev = this
-                .db
-                .insert(k.as_bytes().as_ref(), v.as_bytes().as_ref())
-                .map_err(|e| sled_err("insert", e))?;
-            match prev {
-                Some(p) => lua.create_string(p.as_ref()).map(LuaValue::String),
-                None => Ok(mlua::Value::Nil),
-            }
-        });
-
-        methods.add_method("get", |lua, this, k: LuaValue| {
-            let k = lua_bytes(lua, k)?;
-            let v = this
-                .db
-                .get(k.as_bytes().as_ref())
-                .map_err(|e| sled_err("get", e))?;
-            match v {
-                Some(p) => lua.create_string(p.as_ref()).map(LuaValue::String),
-                None => Ok(mlua::Value::Nil),
-            }
-        });
-
-        methods.add_method("remove", |lua, this, k: LuaValue| {
-            let k = lua_bytes(lua, k)?;
-            let prev = this
-                .db
-                .remove(k.as_bytes().as_ref())
-                .map_err(|e| sled_err("remove", e))?;
-            match prev {
-                Some(p) => lua.create_string(p.as_ref()).map(LuaValue::String),
-                None => Ok(mlua::Value::Nil),
-            }
-        });
-
-        methods.add_method("contains_key", |lua, this, k: LuaValue| {
-            let k = lua_bytes(lua, k)?;
-            this.db
-                .contains_key(k.as_bytes().as_ref())
-                .map_err(|e| sled_err("contains_key", e))
-        });
-
-        methods.add_method("len", |lua, this, ()| {
-            // sled's Tree::len() hangs forever on a dropped tree (its
-            // iterator yields Err instead of None); probe validity first.
-            this.db.first().map_err(|e| sled_err("len", e))?;
-            let _ = lua;
-            Ok(this.db.len() as i64)
-        });
-        methods.add_method("is_empty", |_, this, ()| {
-            this.db.first().map_err(|e| sled_err("is_empty", e))?;
-            Ok(this.db.is_empty())
-        });
-
-        methods.add_method("flush", |_, this, ()| {
-            this.db.flush().map_err(|e| sled_err("flush", e))?;
-            Ok(())
-        });
-
-        methods.add_method("clear", |_, this, ()| {
-            this.db.clear().map_err(|e| sled_err("clear", e))
-        });
-
-        methods.add_method("tree_names", |lua, this, ()| {
-            let names = this.db.tree_names();
-            let t = lua.create_table()?;
-            for (i, name) in names.iter().enumerate() {
-                t.set(i + 1, lua.create_string(name.as_ref())?)?;
-            }
-            Ok(t)
-        });
-
-        methods.add_method("open_tree", |lua, this, name: mlua::LuaString| {
-            let tree = this
-                .db
-                .open_tree(name.as_bytes().as_ref())
-                .map_err(|e| sled_err("open_tree", e))?;
-            lua.create_userdata(LuaTree { tree })
-        });
-
-        methods.add_method("remove_tree", |_, this, name: mlua::LuaString| {
-            let removed = this
-                .db
-                .drop_tree(name.as_bytes().as_ref())
-                .map_err(|e| sled_err("remove_tree", e))?;
-            Ok(removed)
-        });
-
-        methods.add_method("iter", |lua, this, ()| make_iterator(lua, this.db.iter()));
-
-        methods.add_method("range", |lua, this, (start, end): (LuaValue, LuaValue)| {
-            let start = lua_bytes(lua, start)?;
-            let end = lua_bytes(lua, end)?;
-            make_iterator(
-                lua,
-                this.db
-                    .range(start.as_bytes().as_ref()..=end.as_bytes().as_ref()),
-            )
-        });
-
-        methods.add_method(
-            "compare_and_swap",
-            |lua, this, args: (LuaValue, LuaValue, mlua::Variadic<LuaValue>)| {
-                let (k, old, rest) = args;
-                // Db derefs to the default tree.
-                cas_impl(lua, &this.db, k, old, rest)
-            },
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// LuaTree
-// ---------------------------------------------------------------------------
-
-impl mlua::UserData for LuaTree {
-    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("insert", |lua, this, (k, v): (LuaValue, LuaValue)| {
-            let k = lua_bytes(lua, k)?;
-            let v = lua_bytes(lua, v)?;
-            let prev = this
-                .tree
-                .insert(k.as_bytes().as_ref(), v.as_bytes().as_ref())
-                .map_err(|e| sled_err("insert", e))?;
-            match prev {
-                Some(p) => lua.create_string(p.as_ref()).map(LuaValue::String),
-                None => Ok(mlua::Value::Nil),
-            }
-        });
-
-        methods.add_method("get", |lua, this, k: LuaValue| {
-            let k = lua_bytes(lua, k)?;
-            let v = this
-                .tree
-                .get(k.as_bytes().as_ref())
-                .map_err(|e| sled_err("get", e))?;
-            match v {
-                Some(p) => lua.create_string(p.as_ref()).map(LuaValue::String),
-                None => Ok(mlua::Value::Nil),
-            }
-        });
-
-        methods.add_method("remove", |lua, this, k: LuaValue| {
-            let k = lua_bytes(lua, k)?;
-            let prev = this
-                .tree
-                .remove(k.as_bytes().as_ref())
-                .map_err(|e| sled_err("remove", e))?;
-            match prev {
-                Some(p) => lua.create_string(p.as_ref()).map(LuaValue::String),
-                None => Ok(mlua::Value::Nil),
-            }
-        });
-
-        methods.add_method("contains_key", |lua, this, k: LuaValue| {
-            let k = lua_bytes(lua, k)?;
-            this.tree
-                .contains_key(k.as_bytes().as_ref())
-                .map_err(|e| sled_err("contains_key", e))
-        });
-
-        methods.add_method("len", |_, this, ()| {
-            // sled's Tree::len() hangs forever on a dropped tree (its
-            // iterator yields Err instead of None); probe validity first.
-            this.tree.first().map_err(|e| sled_err("len", e))?;
-            Ok(this.tree.len() as i64)
-        });
-        methods.add_method("is_empty", |_, this, ()| {
-            this.tree.first().map_err(|e| sled_err("is_empty", e))?;
-            Ok(this.tree.is_empty())
-        });
-
-        methods.add_method("flush", |_, this, ()| {
-            this.tree.flush().map_err(|e| sled_err("flush", e))?;
-            Ok(())
-        });
-
-        methods.add_method("clear", |_, this, ()| {
-            this.tree.clear().map_err(|e| sled_err("clear", e))
-        });
-
-        methods.add_method(
-            "compare_and_swap",
-            |lua, this, args: (LuaValue, LuaValue, mlua::Variadic<LuaValue>)| {
-                let (k, old, rest) = args;
-                cas_impl(lua, &this.tree, k, old, rest)
-            },
-        );
-
-        methods.add_method("iter", |lua, this, ()| make_iterator(lua, this.tree.iter()));
-
-        methods.add_method("range", |lua, this, (start, end): (LuaValue, LuaValue)| {
-            let start = lua_bytes(lua, start)?;
-            let end = lua_bytes(lua, end)?;
-            make_iterator(
-                lua,
-                this.tree
-                    .range(start.as_bytes().as_ref()..=end.as_bytes().as_ref()),
-            )
-        });
-    }
-}
+impl_tree_methods!(LuaTree, false);
+impl_tree_methods!(LuaDb, true);
 
 // ---------------------------------------------------------------------------
 // module entry

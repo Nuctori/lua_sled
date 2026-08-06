@@ -191,6 +191,95 @@ assert_eq(t2:len(), 0, "tree clear")
 t2 = nil
 
 -- ---------------------------------------------------------------------------
+-- ordered access / scans / batch / transactions
+-- ---------------------------------------------------------------------------
+
+local ord = db:open_tree("ord")
+ord:insert("a", "1")
+ord:insert("b", "2")
+ord:insert("c", "3")
+ord:insert("d", "4")
+
+local fk, fv = ord:first()
+assert_eq(fk, "a", "first key")
+assert_eq(fv, "1", "first value")
+local lk, lv = ord:last()
+assert_eq(lk, "d", "last key")
+assert_eq(lv, "4", "last value")
+
+local ltk, ltv = ord:get_lt("c")
+assert_eq(ltk, "b", "get_lt key")
+assert_eq(ltv, "2", "get_lt value")
+local gtk, gtv = ord:get_gt("b")
+assert_eq(gtk, "c", "get_gt key")
+assert_eq(gtv, "3", "get_gt value")
+assert_eq(ord:get_lt("a"), nil, "get_lt before first is nil")
+assert_eq(ord:get_gt("d"), nil, "get_gt after last is nil")
+
+local pmin_k, pmin_v = ord:pop_min()
+assert_eq(pmin_k, "a", "pop_min key")
+assert_eq(pmin_v, "1", "pop_min value")
+assert_eq(ord:get("a"), nil, "pop_min removed")
+local pmax_k = ord:pop_max()
+assert_eq(pmax_k, "d", "pop_max key")
+assert_eq(ord:len(), 2, "after pops")
+
+ord:insert("aa", "11")
+ord:insert("ab", "12")
+ord:insert("ba", "21")
+local prefixed = {}
+for k in ord:scan_prefix("a") do prefixed[#prefixed + 1] = k end
+assert_eq(#prefixed, 2, "scan_prefix finds aa, ab")
+assert_eq(prefixed[1], "aa", "scan_prefix sorted")
+
+ord:apply_batch({
+  insert = { ["x"] = "X", ["y"] = "Y" },
+  remove = { "b" },
+})
+assert_eq(ord:get("x"), "X", "batch insert")
+assert_eq(ord:get("y"), "Y", "batch insert 2")
+assert_eq(ord:get("b"), nil, "batch remove")
+
+assert_eq(ord:name(), "ord", "tree name")
+assert(type(ord:checksum()) == "number", "checksum is a number")
+ord:verify_integrity()
+
+local tx = db:open_tree("tx")
+tx:insert("k", "0")
+tx:transaction(function(t)
+  local cur = t:get("k")
+  t:insert("k", tostring(cur + 1))
+  return true
+end)
+assert_eq(tx:get("k"), "1", "transaction committed")
+
+tx:transaction(function(t)
+  t:insert("k", "99")
+  return false
+end)
+assert_eq(tx:get("k"), "1", "aborted transaction did not apply")
+
+assert_error("boom", function()
+  tx:transaction(function()
+    error("boom")
+  end)
+end)
+assert_eq(tx:get("k"), "1", "erroring transaction did not apply")
+
+local tx2 = db:open_tree("tx2")
+tx2:transaction(function(t)
+  t:insert("a", "1")
+  t:insert("b", "2")
+  return true
+end)
+assert_eq(tx2:get("a"), "1", "tx2 a")
+assert_eq(tx2:get("b"), "2", "tx2 b")
+
+ord = nil
+tx = nil
+tx2 = nil
+
+-- ---------------------------------------------------------------------------
 -- persistence: drop all handles, reopen the same directory
 -- ---------------------------------------------------------------------------
 

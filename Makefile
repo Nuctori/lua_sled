@@ -34,7 +34,7 @@ CARGO_ARTIFACT := target/release/liblua_sled.so
 MODULE := target/release/lua_sled.so
 endif
 
-.PHONY: all build test test-rust mutants bench clean
+.PHONY: all build test test-rust mutants bench install clean
 
 all: build
 
@@ -81,6 +81,14 @@ bench: build
 	@echo "=== informational (lua side) ==="
 	@grep -E '^(table_|filekv_)' /tmp/sled_bench_lua.txt || true
 	@echo "bench ok (max per-op ratio $(BENCH_MAX_RATIO)x)"
+
+# Used by LuaRocks' make build type (see lua-sled-scm-1.rockspec).
+PREFIX ?= /usr/local
+INSTALL_LIBDIR ?= $(PREFIX)/lib/lua/$(LUA_VERSION)
+
+install: build
+	mkdir -p $(DESTDIR)$(INSTALL_LIBDIR)
+	cp $(MODULE) $(DESTDIR)$(INSTALL_LIBDIR)/
 
 clean:
 	$(CARGO) $(CARGO_TOOLCHAIN) clean
