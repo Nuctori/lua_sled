@@ -1,0 +1,100 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4 liblua5.4-dev pkg-config
+
+      - name: Build
+        run: make build
+
+      - name: Lua tests
+        run: make test
+
+      - name: Rust tests
+        run: make test-rust
+
+  macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: |
+          brew install lua@5.4 pkgconf
+          LUA_PREFIX="$(brew --prefix lua@5.4)"
+          echo "PKG_CONFIG_PATH=$LUA_PREFIX/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "LUA_BIN=$LUA_PREFIX/bin/lua5.4" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: make build
+
+      - name: Lua tests
+        run: make test
+
+      - name: Rust tests
+        run: make test-rust
+
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain (GNU)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: Install GNU host toolchain (matches Makefile)
+        run: rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-make
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-lua54
+
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          export PATH="$(cygpath -u "$USERPROFILE")/.cargo/bin:$PATH"
+          mingw32-make build
+
+      - name: Lua tests
+        shell: msys2 {0}
+        run: |
+          export PATH="$(cygpath -u "$USERPROFILE")/.cargo/bin:$PATH"
+          mingw32-make test
+
+      - name: Rust tests
+        shell: msys2 {0}
+        run: |
+          export PATH="$(cygpath -u "$USERPROFILE")/.cargo/bin:$PATH"
+          mingw32-make test-rust

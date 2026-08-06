@@ -1,0 +1,6 @@
+# Rust build output
+/target
+
+# cargo-mutants output
+/mutants.out
+/mutants.out.*

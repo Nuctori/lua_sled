@@ -1,0 +1,22 @@
+[package]
+name = "lua_sled"
+version = "0.1.0"
+edition = "2021"
+description = "Lua bindings for the sled embedded key-value database"
+license = "MIT"
+repository = "https://github.com/Nuctori/lua_sled"
+
+[lib]
+# rlib lets tests/examples use the crate's Rust API; cdylib is the loadable
+# Lua module.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+mlua = { version = "0.12", features = ["lua54", "module"] }
+sled = "0.34"
+
+[dev-dependencies]
+libloading = "0.8"
+
+[build-dependencies]
+pkg-config = "0.3"

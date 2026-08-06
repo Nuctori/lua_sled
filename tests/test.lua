@@ -1,0 +1,181 @@
+-- lua_sled test suite. Run with `make test` (or directly: lua5.4 tests/test.lua).
+
+local function assert_eq(actual, expected, msg)
+  if actual ~= expected then
+    error((msg or "assert_eq failed") .. string.format(": expected %s, got %s",
+          tostring(expected), tostring(actual)), 2)
+  end
+end
+
+local function assert_error(pattern, fn)
+  local ok, err = pcall(fn)
+  if ok then
+    error("expected error matching " .. pattern, 2)
+  end
+  if not tostring(err):match(pattern) then
+    error(string.format("expected error matching %q, got %q", pattern, tostring(err)), 2)
+  end
+end
+
+local sled = require("lua_sled")
+assert_eq(type(sled), "table", "module must load")
+assert_eq(type(sled.open), "function", "open must be a function")
+
+-- Unique per-run database directory.
+local dir = os.tmpname() .. "-lua_sled"
+local db = sled.open(dir, { create_new = true })
+assert_eq(type(db), "userdata", "db handle")
+
+-- ---------------------------------------------------------------------------
+-- basic key/value
+-- ---------------------------------------------------------------------------
+
+assert_eq(db:is_empty(), true, "fresh db is empty")
+assert_eq(db:get("nope"), nil, "missing key is nil")
+assert_eq(db:contains_key("nope"), false, "missing contains_key")
+
+local prev = db:insert("k1", "v1")
+assert_eq(prev, nil, "first insert returns nil")
+assert_eq(db:get("k1"), "v1", "get after insert")
+assert_eq(db:insert("k1", "v2"), "v1", "overwrite returns previous")
+assert_eq(db:get("k1"), "v2", "overwritten value")
+assert_eq(db:contains_key("k1"), true, "contains after insert")
+assert_eq(db:len(), 1, "len")
+
+-- numbers are accepted as keys/values (converted like tostring)
+db:insert(42, "answer")
+assert_eq(db:get(42), "answer", "numeric key")
+assert_eq(db:get("42"), "answer", "numeric key normalizes to string")
+db:insert("n", 7)
+assert_eq(db:get("n"), "7", "numeric value converts")
+
+-- binary-safe keys and values
+local bin_key = "\0\1\2\255"
+local bin_val = "\254\253\0"
+db:insert(bin_key, bin_val)
+assert_eq(db:get(bin_key), bin_val, "binary key/value round-trip")
+
+-- remove
+assert_eq(db:remove("n"), "7", "remove returns previous")
+assert_eq(db:get("n"), nil, "removed key is nil")
+assert_eq(db:remove("n"), nil, "removing missing returns nil")
+
+-- ---------------------------------------------------------------------------
+-- iteration
+-- ---------------------------------------------------------------------------
+
+db:clear()
+db:insert("a", "1")
+db:insert("b", "2")
+db:insert("c", "3")
+
+local iter_keys = {}
+local iter_vals = {}
+for k, v in db:iter() do
+  iter_keys[#iter_keys + 1] = k
+  iter_vals[#iter_vals + 1] = v
+end
+assert_eq(#iter_keys, 3, "iter yields all keys")
+assert_eq(iter_keys[1], "a", "iter sorted order")
+assert_eq(iter_keys[2], "b", "iter sorted order 2")
+assert_eq(iter_keys[3], "c", "iter sorted order 3")
+assert_eq(iter_vals[1], "1", "iter values")
+
+-- empty db iteration terminates
+db:clear()
+local empty_count = 0
+for _ in db:iter() do empty_count = empty_count + 1 end
+assert_eq(empty_count, 0, "iter on empty db")
+
+db:insert("a", "1")
+db:insert("b", "2")
+db:insert("c", "3")
+db:insert("d", "4")
+
+-- range (inclusive on both ends)
+local ranged = {}
+for k in db:range("b", "c") do ranged[#ranged + 1] = k end
+assert_eq(#ranged, 2, "range b-c inclusive")
+assert_eq(ranged[1], "b", "range start")
+assert_eq(ranged[2], "c", "range end")
+
+-- early-exit iteration (iterator is a plain for-in state, freed on break)
+local first = nil
+for k in db:iter() do first = k; break end
+assert_eq(first, "a", "early break iteration")
+
+-- ---------------------------------------------------------------------------
+-- trees (namespaces)
+-- ---------------------------------------------------------------------------
+
+local users = db:open_tree("users")
+assert_eq(type(users), "userdata", "tree handle")
+users:insert("alice", "42")
+users:insert("bob", "7")
+assert_eq(users:get("alice"), "42", "tree get")
+assert_eq(db:get("alice"), nil, "tree is isolated from the main tree")
+assert_eq(users:len(), 2, "tree len")
+
+-- trees appear in tree_names
+local names = {}
+for _, n in ipairs(db:tree_names()) do names[n] = true end
+assert(names["users"], "tree_names contains the new tree")
+
+-- remove_tree drops it
+assert_eq(db:remove_tree("users"), true, "remove_tree returns true")
+assert_eq(db:remove_tree("users"), false, "remove_tree on missing tree returns false")
+-- the dropped tree handle is invalidated by sled
+assert_error("does not exist", function() users:get("alice") end)
+
+-- ---------------------------------------------------------------------------
+-- compare_and_swap
+-- ---------------------------------------------------------------------------
+
+local counter = db:open_tree("counter")
+counter:insert("n", "0")
+assert_eq(counter:compare_and_swap("n", "0", "1"), true, "cas success")
+assert_eq(counter:get("n"), "1", "cas applied")
+assert_eq(counter:compare_and_swap("n", "stale", "99"), false, "cas stale fails")
+assert_eq(counter:get("n"), "1", "cas failed leaves value")
+
+-- ---------------------------------------------------------------------------
+-- persistence: drop all handles, reopen the same directory
+-- ---------------------------------------------------------------------------
+
+db:flush()
+counter = nil
+users = nil
+db = nil
+collectgarbage("collect")
+
+local db2 = sled.open(dir)
+assert_eq(db2:get("a"), "1", "persisted value")
+assert_eq(db2:get("d"), "4", "persisted d")
+assert_eq(db2:open_tree("counter"):get("n"), "1", "persisted tree")
+assert_eq(db2:len(), 4, "persisted len (a-d)")
+
+-- ---------------------------------------------------------------------------
+-- errors
+-- ---------------------------------------------------------------------------
+
+assert_error("unknown open option", function()
+  sled.open(dir, { bogus = 1 })
+end)
+assert_error("must be a string", function() db2:insert(true, "x") end)
+assert_error("must be a string", function() db2:insert("k", true) end)
+assert_error("must be a string", function() db2:get({}) end)
+assert_error("must be a string", function() db2:insert("k") end)
+assert_error("bad argument", function() sled.open() end)
+
+-- ---------------------------------------------------------------------------
+-- reopen without create_new on an existing dir (after dropping handles)
+-- ---------------------------------------------------------------------------
+
+db2 = nil
+collectgarbage("collect")
+local db3 = sled.open(dir)
+assert_eq(db3:get("a"), "1", "reopen without options")
+
+db3 = nil
+collectgarbage("collect")
+print("lua_sled tests passed")
