@@ -55,11 +55,12 @@ assert_eq(db:get("42.0"), "float-key", "float key uses lua tostring")
 assert_eq(db:get(42.0), "float-key", "float key round-trip")
 assert_eq(db:get("42"), "answer", "float and integer keys are distinct")
 
--- NaN/Inf keys follow Lua tostring too ("nan"/"inf"/"-inf" strings)
+-- NaN/Inf keys round-trip via the same literal (the exact string form is
+-- implementation-defined across Lua builds, so do not assert it)
 db:insert(0 / 0, "nan-val")
-assert_eq(db:get("nan"), "nan-val", "nan key is the string 'nan'")
+assert_eq(db:get(0 / 0), "nan-val", "nan key round-trips")
 db:insert(1 / 0, "inf-val")
-assert_eq(db:get("inf"), "inf-val", "inf key is the string 'inf'")
+assert_eq(db:get(1 / 0), "inf-val", "inf key round-trips")
 
 -- -0.0 and 0.0 are equal but map to different strings (Lua tostring)
 db:insert(-0.0, "negzero")
