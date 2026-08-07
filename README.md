@@ -44,6 +44,53 @@ make mutants     # mutation testing (needs `cargo install cargo-mutants`)
 make bench       # performance: lua_sled vs native sled (+ CI ratio guard)
 ```
 
+### Test suite
+
+`tests/test.lua` (~115 assertions) covers:
+
+- **key/value**: insert/get/remove/contains_key/len/is_empty, overwrite
+  returning the previous value, binary-safe keys/values (including NUL
+  bytes), numeric keys with Lua `tostring` semantics (`42.0` → `"42.0"`,
+  distinct from `42`)
+- **iteration**: `iter`/`range` sorted order, inclusive range bounds,
+  early `break`, empty-tree iteration; `scan_prefix`
+- **ordered access**: `first`/`last`, `get_lt`/`get_gt` (strict),
+  `pop_min`/`pop_max` (atomic)
+- **trees**: namespace isolation, `tree_names`, `remove_tree` invalidating
+  old handles (including `len`/`is_empty`, which the binding probes to
+  avoid sled's dropped-tree infinite loop)
+- **atomicity**: `compare_and_swap` success/stale, insert-if-absent
+  (nil old), conditional delete (nil new), missing-argument safety;
+  `transaction` commit / silent abort / Lua-error propagation
+- **batches**: `apply_batch` insert+remove
+- **persistence**: drop all handles (GC) then reopen — data survives;
+  reopening without `create_new` works
+- **input/option validation**: unknown options, non-boolean
+  `create_new`/`temporary` (a stray `0` would silently enable temporary),
+  `cache_capacity < 256`, non-string paths, out-of-range values
+
+`make test` runs the suite against the release module. `make test-rust`
+additionally runs the same suite from inside `cargo test`
+(`tests/lua_tests.rs` loads the cdylib through the raw Lua C API), which is
+what makes `make mutants` meaningful: every injected mutant is exercised
+against the full Lua assertion set.
+
+### CI (GitHub Actions)
+
+`.github/workflows/ci.yml` runs on every push/PR:
+
+| Job | Runner | Steps |
+|-----|--------|-------|
+| `linux` | ubuntu-latest | `make build` → `make test` → `make test-rust` |
+| `macos` | macos-latest | same (Homebrew lua@5.4 via `PKG_CONFIG_PATH`/`LUA_BIN`) |
+| `windows` | windows-latest | MSYS2 UCRT64 + GNU Rust toolchain → `mingw32-make build/test/test-rust` |
+| `bench` | ubuntu-latest | `make bench` — native-vs-binding per-op ratios, fails if any exceeds `BENCH_MAX_RATIO` (200x) |
+
+All jobs build the same source; the Windows job verifies the GNU linker
+path (MinGW Lua ABI) and the bench job guards performance regressions.
+`.github/workflows/release.yml` runs on `v*` tags (or manually) and
+publishes prebuilt `lua_sled.so`/`.dll` artifacts for the three platforms.
+
 ## Installation
 
 The simplest path is a source build (`make build`); with LuaRocks:

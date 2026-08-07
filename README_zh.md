@@ -35,6 +35,44 @@ make mutants     # 变异测试（需 `cargo install cargo-mutants`）
 make bench       # 性能对比：lua_sled vs 原生 sled（+ CI 比值守卫）
 ```
 
+### 测试套件
+
+`tests/test.lua`（约 115 个断言）覆盖：
+
+- **键值**：insert/get/remove/contains_key/len/is_empty、覆盖返回旧值、
+  二进制安全（含 NUL 字节）、数字键按 Lua `tostring` 语义（`42.0` →
+  `"42.0"`，与 `42` 不同）
+- **迭代**：`iter`/`range` 排序、闭区间边界、提前 `break`、空树迭代；`scan_prefix`
+- **有序访问**：`first`/`last`、`get_lt`/`get_gt`（严格）、`pop_min`/`pop_max`（原子）
+- **树**：命名空间隔离、`tree_names`、`remove_tree` 使旧句柄失效（含
+  `len`/`is_empty`——绑定先探测以避免 sled 已删树无限循环）
+- **原子性**：`compare_and_swap` 成功/过期、不存在则插入（nil old）、条件删除
+  （nil new）、缺参安全；`transaction` 提交/静默放弃/Lua 错误传播
+- **批量**：`apply_batch` insert+remove
+- **持久化**：释放所有句柄（GC）后重开——数据仍在；无 `create_new` 重开可用
+- **输入/选项校验**：未知选项、非布尔 `create_new`/`temporary`（`0` 会静默
+  开启临时模式）、`cache_capacity < 256`、非字符串路径、越界值
+
+`make test` 对 release 模块跑套件。`make test-rust` 额外让同一套件跑在
+`cargo test` 内（`tests/lua_tests.rs` 通过 raw Lua C API 加载 cdylib）——
+这正是 `make mutants` 有意义的前提：每个注入的变异都会被完整 Lua 断言
+集检验。
+
+### CI（GitHub Actions）
+
+`.github/workflows/ci.yml` 在每次 push/PR 时运行：
+
+| Job | 运行环境 | 步骤 |
+|-----|----------|------|
+| `linux` | ubuntu-latest | `make build` → `make test` → `make test-rust` |
+| `macos` | macos-latest | 相同（Homebrew lua@5.4，经 `PKG_CONFIG_PATH`/`LUA_BIN`） |
+| `windows` | windows-latest | MSYS2 UCRT64 + GNU Rust 工具链 → `mingw32-make build/test/test-rust` |
+| `bench` | ubuntu-latest | `make bench` — 原生 vs 绑定每操作比值，超过 `BENCH_MAX_RATIO`（200x）即失败 |
+
+所有 job 构建同一份源码；Windows job 验证 GNU 链接路径（MinGW Lua ABI），
+bench job 守卫性能回退。`.github/workflows/release.yml` 在 `v*` tag（或手动）
+触发，发布三平台的预编译 `lua_sled.so`/`.dll` 产物。
+
 ## 安装
 
 最简单的方式是源码构建（`make build`）；或使用 LuaRocks：
